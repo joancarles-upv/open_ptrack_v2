@@ -78,7 +78,10 @@
 #include <opt_msgs/ObjectNameArray.h>
 
 #include <ros/package.h>
+//#include <boost/filesystem.hpp>
+#include <opencv2/video/background_segm.hpp>
 
+//namespace fs = ::boost::filesystem;
 using namespace opt_msgs;
 using namespace sensor_msgs;
 using namespace std;
@@ -137,10 +140,12 @@ private:
 
 
   ///////////For background removal///////////
-  cv::Mat depth_max;
   bool use_background_removal;
-  int background_calculate_frames;
-  int threshold_4_detecting_foreground;
+  int threshold_4_shadow;
+  int number_of_frames_for_static_background;
+  //new bg with just color from opencv3
+  Ptr<BackgroundSubtractor> pMOG2;
+  Mat fgMaskMOG2;
   ///////////For background removal///////////
 
 
@@ -167,7 +172,7 @@ private:
   ///////////For main detection///////////
   std::vector<Object_Detector> Object_Detectors;
   std::vector<Rect> current_detected_boxes;
-  cv::Mat main_color,main_depth_16,main_depth_8;
+  cv::Mat main_color,main_color_origin,main_hsv,hsv_mask,main_depth_16,main_depth_8;
   ///////////For main detection///////////
 
 
@@ -183,10 +188,10 @@ private:
 
 public:
   Multiple_Objects_Detection(const std::string &output_detection_topic,const bool set_object_names,const bool useExact, const bool useCompressed,
-                             const bool use_background_removal, const int background_calculate_frames,const int threshold_4_detecting_foreground,const bool show_2D_tracks)
+                             const bool use_background_removal,const int threshold_4_shadow, const int number_of_frames_for_static_bs, const bool show_2D_tracks)
     : output_detection_topic(output_detection_topic),set_object_names(set_object_names),useExact(useExact), useCompressed(useCompressed),updateImage(false), running(false),
-      use_background_removal(use_background_removal),objects_selected(false), finished_select_rois_from_file(false),background_calculate_frames(background_calculate_frames),threshold_4_detecting_foreground(threshold_4_detecting_foreground), queueSize(5),
-      nh(), spinner(0), it(nh) ,show_2D_tracks(show_2D_tracks)
+      use_background_removal(use_background_removal),threshold_4_shadow(threshold_4_shadow),objects_selected(false), finished_select_rois_from_file(false), queueSize(5),
+      nh(), spinner(0), it(nh) ,show_2D_tracks(show_2D_tracks), number_of_frames_for_static_background(number_of_frames_for_static_bs)
   {
     std::string cameraName = "kinect2_head";
     topicColor = "/" + cameraName + "/" + K2_TOPIC_LORES_COLOR K2_TOPIC_RAW;
@@ -204,7 +209,8 @@ public:
   void run_detection(){
 
     start_reciver();// define some subscribers
-
+    pMOG2 = createBackgroundSubtractorMOG2();
+    int frame_id(0);
     for(; running && ros::ok();)
     {
       if(updateImage)//if recieved color and depth msg
@@ -215,36 +221,56 @@ public:
         updateImage = false;
         lock.unlock();
 
-        // if accept background_removal ,generate the new color image without background
+        //                main_color.copyTo(main_color_origin);
+        Object_Detector::setMainColorOrigin(main_color);
+
         if(use_background_removal)
         {
-          if ((background_calculate_frames>0))// if the background has not been got
-          {
-            background_calculation();
-          }
-          else//after getting the bakground (depth_max), use it to do background removal,generate new color
-          {
-            background_removal();
-          }
+          if(number_of_frames_for_static_background == -1)
+            pMOG2->apply(main_color, fgMaskMOG2);
+          else
+            frame_id++ < number_of_frames_for_static_background ?
+                  pMOG2->apply(main_color, fgMaskMOG2):
+                  pMOG2->apply(main_color, fgMaskMOG2, 0);
+          cv::threshold(fgMaskMOG2, fgMaskMOG2, threshold_4_shadow, 255, cv::THRESH_BINARY);
+          Mat fg;
+          main_color.copyTo(fg, fgMaskMOG2);
+          main_color=fg;
         }
 
-        // if don't accept background_removal or  background is already removed
-        if(!use_background_removal||(use_background_removal&&background_calculate_frames==0))
+
+        //                cv::cvtColor(main_color, main_hsv, CV_BGR2HSV);
+        //                Object_Detector::setMainColor(main_hsv);// set all the detectors' "main_hsv"
+
+        //                //calculate the hsv_mask by the range
+        //                cv::inRange(main_hsv, cv::Scalar(Object_Detector::HMin, Object_Detector::SMin, MIN(Object_Detector::VMin,Object_Detector::VMax)), cv::Scalar(Object_Detector::HMax, Object_Detector::SMax, MAX(Object_Detector::VMin, Object_Detector::VMax)), hsv_mask);
+        //                Object_Detector::setHsvMask(hsv_mask);// set all the detectors' "main_hsv"
+
+        //                if(Object_Detector::Backprojection_Mode=="HSD")// if use HSD, convert the depth from 16bit into 8bit
+        //                {
+        //                    //devide (1000mm~9000mm) into 255 parts
+        //                    ushort Max=9000,Min=1000;
+        //                    main_depth_16.convertTo(main_depth_8, CV_8U,255.0/(Max-Min),-255.0*Min/(Max-Min));
+        //                    Object_Detector::setMainDepth(main_depth_8);
+        //                }
+        //                else
+        //                {
+        //                    Object_Detector::setMainDepth(main_depth_16);
+        //                }
+
+        if(finished_select_rois_from_file)//keep checkin gif there are new rois
+          select_rois_from_file();
+
+        if(!rois_from_gui.empty())//keep checkin gif there are new rois
+          select_rois_from_gui();
+
+        //                if (!objects_selected)
+        //                    select_rois_from_file_locally();
+        multiple_objects_detection_main();// main detection
+
+        if(show_2D_tracks)
         {
-          //!!!!!!!!!!!!!!!!!!!!!!!main loop!!!!!!!!!!!!!!!!!!!!!!!
-
-          if(finished_select_rois_from_file)//keep checkin gif there are new rois
-            select_rois_from_file();
-
-          if(!rois_from_gui.empty())//keep checkin gif there are new rois
-            select_rois_from_gui();
-
-          multiple_objects_detection_main();// main detection
-
-          if(show_2D_tracks)
-          {
-            show_2D_tracks_on_image();
-          }
+          show_2D_tracks_on_image();
         }
       }
     }
@@ -299,72 +325,6 @@ private:
     }
   }
 
-  void background_calculation()
-  {
-    Mat test_backgroundfile=imread("/tmp/depth_background.png",CV_LOAD_IMAGE_UNCHANGED);
-    if(!test_backgroundfile.empty())// if the background successfully read from file
-    {
-      depth_max = test_backgroundfile;
-      background_calculate_frames=0;
-      printf("use background removal and background is successfully read from file......\n");
-      printf("please press P to select ROIs......\n");
-    }
-    else//background can't be read from file, being calculated
-    {
-      printf("use background removal but background can't be read from file, being calculated......\n");
-      if(depth_max.empty())
-        depth_max=Mat::zeros(main_depth_16.size(),CV_16UC1);
-      else
-        depth_max=cv::max(depth_max,main_depth_16);
-      background_calculate_frames--;
-      if(background_calculate_frames==0)//save background file
-      {
-        std::vector<int> compression_params;
-        compression_params.push_back(CV_IMWRITE_PNG_COMPRESSION);
-        compression_params.push_back(0);
-        //  pcl::io::savePCDFileASCII ("/tmp/background_" + frame_id.substr(1, frame_id.length()-1) + ".pcd", *background_cloud);
-        cv::imwrite("/tmp/depth_background.png", depth_max, compression_params);
-        printf("background is sucessfully calculated and saved......\n");
-        printf("please press P to select ROIs......\n");
-      }
-    }
-  }
-
-  void background_removal()
-  {
-    Mat depth_diff=depth_max-main_depth_16;
-
-    int nr=depth_diff.rows;
-    int nc=depth_diff.cols;
-    if(depth_diff.isContinuous()&&main_color.isContinuous())
-    {
-      nr=1;
-      nc=nc*depth_diff.rows*depth_diff.channels();
-    }
-    for(int i=0;i<nr;i++)
-    {
-      ushort* depth_diffData=depth_diff.ptr<ushort>(i);
-      uchar* colorData=main_color.ptr<uchar>(i*3);
-      for(int j=0;j<nc;j++)
-      {
-        if (*depth_diffData<threshold_4_detecting_foreground)
-        {
-          *colorData++=0;
-          *colorData++=0;
-          *colorData++=0;
-          depth_diffData++;
-        }
-        else
-        {
-          colorData++;
-          colorData++;
-          colorData++;
-          depth_diffData++;
-        }
-      }
-    }
-  }
-
   void select_rois_from_file()
   {
 
@@ -401,8 +361,63 @@ private:
     finished_select_rois_from_file=false;
     std::cout<<rois_from_file.size()<<" objects are selected from file"<<std::endl;
   }
+  /*
+    void get_all(const fs::path& root, const std::string& ext, std::vector<fs::path>& ret)
+    {
+        if(!fs::exists(root) || !fs::is_directory(root)) return;
 
+        fs::recursive_directory_iterator it(root);
+        fs::recursive_directory_iterator endit;
 
+        while(it != endit)
+        {
+            if(fs::is_regular_file(*it) && it->path().extension() == ext) ret.push_back(it->path().filename());
+            ++it;
+
+        }
+
+    }
+    void select_rois_from_file_locally()
+    {
+
+        //    std::string sensor_name=topicColor.substr(1, (topicColor.size()-17));
+        //    std::cout<< "sensor_name"<<sensor_name<,std::endl;
+        //    std::string rois_dir_path=ros::package::getPath("opt_gui")+"/data/"+sensor_name;
+
+        std::string rois_dir_path=ros::package::getPath("opt_gui")+"/data/Kinect_1/";
+        std::vector<fs::path> roi_filenames;
+        get_all(rois_dir_path, ".png", roi_filenames);
+
+        //publish roi iamge one by one
+        for(const auto& name : roi_filenames)
+        {
+            cv::Mat image_roi = cv::imread(rois_dir_path+fs::basename(name) + ".png");
+            //      rois_from_file.push_back(image_roi);
+
+            std::string tmp_str=fs::basename(name);
+            std::size_t p2 = tmp_str.find_last_of("{");
+            std::size_t q2 = tmp_str.find_last_of("}");
+            std::string object_name_from_file=tmp_str.substr(p2+1,q2-p2-1);
+
+            Object_Detector newDetector;//create new detector
+            newDetector.setObjectName(object_name_from_file);
+            newDetector.setCurrentRect(Rect(0,0,main_color.size().width,main_color.size().height));//set the whole image as the ROI
+            newDetector.occluded=true;//set the occlusion into true so that the detector will keep searching in the whole image for the object untill it shows up
+            newDetector.roi_from_file=image_roi;// set the roi from the cv::Rect in rois_from_file
+            Object_Detectors.push_back(newDetector);
+            current_detected_boxes.push_back(Rect(0,0,1,1));
+            std::list<Rect> tracks_2D_(10);
+            tracks_2D.push_back(tracks_2D_);
+            bool occlude_=true;
+            occludes.push_back(occlude_);
+            Object_Detector::current_detected_boxes=current_detected_boxes;
+        }
+        objects_selected=true;
+        finished_select_rois_from_file=false;
+        std::cout<<roi_filenames.size()<<" objects are selected from file"<<std::endl;
+
+    }
+*/
   void select_rois_from_gui()
   {
     if(rois_from_gui.empty())//when the "image2D_rois_from_gui_Callback" is activted, the "rois_from_gui" will be filled with cv::Rect
@@ -429,15 +444,21 @@ private:
     rois_from_gui.clear();
   }
 
-
   void multiple_objects_detection_main()    //main_detection
   {
     if( main_color.empty()||Object_Detectors.empty())
       return;
 
+    //        ////////////////////////////////////////set the input(color+depth) of every detector////////////////////////////////////////
 
-    ////////////////////////////////////////set the input(color+depth) of every detector////////////////////////////////////////
-    Object_Detector::setMainColor(main_color);// set all the detectors' "main_color"
+    cv::cvtColor(main_color, main_hsv, CV_BGR2HSV);
+    Object_Detector::setMainColor(main_hsv);// set all the detectors' "main_hsv"
+
+    //calculate the hsv_mask by the range
+    cv::inRange(main_hsv, cv::Scalar(Object_Detector::HMin, Object_Detector::SMin, MIN(Object_Detector::VMin,Object_Detector::VMax)), cv::Scalar(Object_Detector::HMax, Object_Detector::SMax, MAX(Object_Detector::VMin, Object_Detector::VMax)), hsv_mask);
+    Object_Detector::setHsvMask(hsv_mask);// set all the detectors' "main_hsv"
+
+
     if(Object_Detector::Backprojection_Mode=="HSD")// if use HSD, convert the depth from 16bit into 8bit
     {
       //devide (1000mm~9000mm) into 255 parts
@@ -450,6 +471,8 @@ private:
       Object_Detector::setMainDepth(main_depth_16);
     }
     ////////////////////////////////////////set the input(color+depth) of every detector////////////////////////////////////////
+
+    //        Object_Detector::setMainColorOrigin(main_color_origin);
 
 
 
@@ -485,7 +508,7 @@ private:
 
         ////////////////////for display the detection ellipse and track points////////////////////
         current_detected_boxes[i]=current_trackBox.boundingRect();
-        cv::ellipse(main_color, current_trackBox, cv::Scalar(250*(i), 250*(i-1), 250*(i-2)), 2, CV_AA);
+        cv::ellipse(main_color, current_trackBox, cv::Scalar(250*(i+1), 250*(i), 250*(i-1)), 2, CV_AA);
         //cv::rectangle(color, current_trackBox.boundingRect(), cv::Scalar(255, 0, 0), 2, CV_AA);
         tracks_2D[i].push_back(current_detected_boxes[i]);
         tracks_2D[i].pop_front();
@@ -570,15 +593,13 @@ private:
       {
         Rect test_Rect((*it).x+((*it).width)/2,(*it).y+((*it).height)/2,1,1);
         test_Rect=test_Rect&Rect(0,0,main_color.size().width,main_color.size().height);
-        cv::rectangle(main_color, test_Rect, cv::Scalar(250*(i), 250*(i-1), 250*(i-2)), 2, CV_AA);
+        cv::rectangle(main_color, test_Rect, cv::Scalar(250*(i+1), 250*(i), 250*(i-1)), 2, CV_AA);
       }
     }
     cv::namedWindow("show_2D_tracks");
     cv::imshow( "show_2D_tracks", main_color );
     cv::waitKey(10);
   }
-
-
 
   //recieve the color and depth image
   void image_callback(const sensor_msgs::Image::ConstPtr imageColor, const sensor_msgs::Image::ConstPtr imageDepth,
@@ -625,7 +646,6 @@ private:
     lock.unlock();
   }
 
-
   //recieve the roi msg(x,y,width,height) from marking in the gui
   void image2D_rois_from_gui_Callback(const opt_msgs::Image2D_roi_array::ConstPtr& image2D_roi_msg)
   {
@@ -644,7 +664,6 @@ private:
       std::cout<<"got image msg comes from gui"<<std::endl;
     }
   }
-
 
   //recieve the roi msg(image) from file
   void image2D_rois_from_file_Callback(const opt_msgs::Image2D_roi_filePtr &msg)
@@ -680,10 +699,6 @@ private:
     }
   }
 
-
-
-
-
   void object_names_from_tracker_callback(const opt_msgs::ObjectNameArrayConstPtr& object_names_msg)
   {
     if (("/"+object_names_msg->header.frame_id)==color_header_frameId)
@@ -701,8 +716,6 @@ private:
     }
   }
 
-
-
   void readImage(const sensor_msgs::Image::ConstPtr msgImage, cv::Mat &image) const
   {
     cv_bridge::CvImageConstPtr pCvImage;
@@ -719,5 +732,4 @@ private:
     }
   }
 };
-
 

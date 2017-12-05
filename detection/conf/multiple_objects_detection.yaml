@@ -5,7 +5,7 @@
 output_detection_topic: /objects_detector/detections
 
 #if you want to see the tracks result on the image, set show_2D_track to true
-show_2D_track: false #true
+show_2D_track: false
 
 
 ###########For choose on which camera to set the object names###########
@@ -17,15 +17,11 @@ set_object_names: true
 ## Background removal ##
 ############################
 
-use_background_removal: false
+use_background_removal: true
 
-#use how many frame to calculate the background
-background_calculate_frames: 100
+threshold_4_shadow: 250
 
-#threshold of depth difference,use the difference to ditinguish the background and foreground
-threshold_4_detecting_foreground: 100
-
-
+number_of_frames_to_compute_the_static_background: 20
 
 ##############################################
 ## object_detector parameters ##
@@ -40,15 +36,15 @@ HMax: 360
 SMin: 80
 SMax: 256
 
-VMin: 100
+VMin: 50
 VMax: 256
 ########for the HSV mask#######
 
 
 ###########For camshift########
 #for the hue backrojection hist ,divide (HMin,HMax) to "h_bins" parts,
-h_bins: 36
-s_bins: 18
+h_bins: 9
+s_bins: 9
 
 #for the depth, transfer the depth from (1000,9000) into (0, 255), than divide them into "d_bins" parts
 d_bins: 100
